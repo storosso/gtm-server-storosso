@@ -1,4 +1,3 @@
-
 const http = require('http');
 const url = require('url');
 
@@ -7,12 +6,12 @@ const PORT = process.env.PORT || 8080;
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // CORS headers (production safe)
+  res.setHeader('Access-Control-Allow-Origin', 'https://storosso.com');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Origin, Accept');
 
-  // OPTIONS preflight
+  // Preflight response
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
@@ -24,7 +23,7 @@ const server = http.createServer((req, res) => {
     return res.end('OK');
   }
 
-  // GTM Server Collection Endpoint
+  // GTM Server Tag endpoint
   if (pathname === '/collect' || pathname === '/g/collect') {
     if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'text/plain' });
@@ -33,6 +32,7 @@ const server = http.createServer((req, res) => {
 
     let body = '';
     req.on('data', chunk => { body += chunk; });
+
     req.on('end', () => {
       if (!body || body.trim().length === 0) {
         console.error('❌ Empty or invalid JSON body');
@@ -55,7 +55,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Fallback 404
+  // Fallback
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('Not Found');
 });
