@@ -32,6 +32,9 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', chunk => body += chunk.toString());
     req.on('end', () => {
+      console.log('🔍 Raw Headers:', req.headers);
+      console.log('📥 Raw Body:', body);
+
       if (!body || body.trim().length === 0) {
         console.error('❌ Empty request body');
         res.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -47,16 +50,18 @@ const server = http.createServer((req, res) => {
         const event_source_url = parsed.event_source_url || '';
         const action_source = parsed.action_source || 'website';
 
-        // Fallback pentru ecommerce.items
         const items = parsed.items || parsed.ecommerce?.items || [];
+        const contents = parsed.custom_data?.contents?.length
+          ? parsed.custom_data.contents
+          : items.map(item => ({
+              id: item.item_id || item.id || 'unknown',
+              quantity: item.quantity || 1,
+              item_price: item.price || 0
+            }));
 
-        const contents = (parsed.custom_data?.contents?.length ? parsed.custom_data.contents : items.map(item => ({
-          id: item.item_id || item.id || 'unknown',
-          quantity: item.quantity || 1,
-          item_price: item.price || 0
-        })));
-
-        const content_ids = (parsed.custom_data?.content_ids?.length ? parsed.custom_data.content_ids : contents.map(c => c.id));
+        const content_ids = parsed.custom_data?.content_ids?.length
+          ? parsed.custom_data.content_ids
+          : contents.map(c => c.id);
 
         const valueFromContents = contents.reduce((sum, c) => {
           const q = Number(c.quantity || 1);
@@ -109,8 +114,8 @@ const server = http.createServer((req, res) => {
           fbRes.on('data', chunk => fbData += chunk);
           fbRes.on('end', () => {
             console.log(`📬 Meta response [${fbRes.statusCode}]:\n${fbData}`);
-            res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Meta response logged');
+            res.writeHead(fbRes.statusCode, { 'Content-Type': 'application/json' });
+            res.end(fbData);
           });
         });
 
@@ -138,5 +143,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Debug Server running on port ${PORT}`);
 });
