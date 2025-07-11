@@ -40,27 +40,44 @@ const server = http.createServer((req, res) => {
 
       try {
         const parsed = JSON.parse(body);
-        console.log('✅ Parsed event:', JSON.stringify(parsed, null, 2));
+        console.log('✅ Parsed event:\n', JSON.stringify(parsed, null, 2));
 
         const event_name = parsed.event_name || 'unknown';
         const event_time = parsed.event_time || Math.floor(Date.now() / 1000);
         const event_source_url = parsed.event_source_url || '';
         const action_source = parsed.action_source || 'website';
 
+        // Fallback pentru ecommerce.items
+        const items = parsed.items || parsed.ecommerce?.items || [];
+
+        const contents = (parsed.custom_data?.contents?.length ? parsed.custom_data.contents : items.map(item => ({
+          id: item.item_id || item.id || 'unknown',
+          quantity: item.quantity || 1,
+          item_price: item.price || 0
+        })));
+
+        const content_ids = (parsed.custom_data?.content_ids?.length ? parsed.custom_data.content_ids : contents.map(c => c.id));
+
+        const valueFromContents = contents.reduce((sum, c) => {
+          const q = Number(c.quantity || 1);
+          const p = Number(c.item_price || 0);
+          return sum + (q * p);
+        }, 0);
+
         const custom_data = {
-          value: parsed.custom_data?.value || 0,
+          value: parsed.custom_data?.value || valueFromContents,
           currency: parsed.custom_data?.currency || 'EUR',
           content_name: parsed.custom_data?.content_name || '',
           content_category: parsed.custom_data?.content_category || '',
-          content_ids: parsed.custom_data?.content_ids || [],
-          contents: parsed.custom_data?.contents || [],
+          content_ids,
+          contents,
           ...parsed.custom_data
         };
 
         const user_data = {
           em: parsed.user_data?.em || '',
-          client_ip_address: parsed.user_data?.client_ip_address || '',
-          client_user_agent: parsed.user_data?.client_user_agent || '',
+          client_ip_address: parsed.user_data?.client_ip_address || req.socket.remoteAddress || '',
+          client_user_agent: parsed.user_data?.client_user_agent || req.headers['user-agent'] || '',
           fbp: parsed.user_data?.fbp || '',
           fbc: parsed.user_data?.fbc || ''
         };
