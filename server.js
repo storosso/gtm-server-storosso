@@ -9,7 +9,6 @@ const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN;
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -43,73 +42,37 @@ const server = http.createServer((req, res) => {
         const parsed = JSON.parse(body);
         console.log('✅ Parsed event:', parsed);
 
-        const event_name = parsed.event_name || 'PageView';
+        const event_name = parsed.event_name || 'unknown';
         const event_time = parsed.event_time || Math.floor(Date.now() / 1000);
         const event_source_url = parsed.event_source_url || '';
         const action_source = parsed.action_source || 'website';
 
-        const user_data = {
-          em: parsed.user_data?.em,
-          ph: parsed.user_data?.ph,
-          fbp: parsed.user_data?.fbp,
-          fbc: parsed.user_data?.fbc,
-          client_ip_address: parsed.user_data?.client_ip_address,
-          client_user_agent: parsed.user_data?.client_user_agent
-        };
-
+        // Fallbacks pentru custom_data
         const custom_data = {
-          currency: parsed.custom_data?.currency || parsed.currency || 'EUR',
-          value: parsed.custom_data?.value || parsed.value || 0,
-          content_ids: parsed.custom_data?.content_ids || parsed.content_ids || [],
-          contents: parsed.custom_data?.contents || parsed.contents || [],
-          content_type: parsed.custom_data?.content_type || parsed.content_type || 'product'
+          value: parsed.custom_data?.value || 0,
+          currency: parsed.custom_data?.currency || 'EUR',
+          content_name: parsed.custom_data?.content_name || '',
+          content_category: parsed.custom_data?.content_category || '',
+          content_ids: parsed.custom_data?.content_ids || [],
+          contents: parsed.custom_data?.contents || [],
+          ...parsed.custom_data
         };
 
-        const hasUserMatch =
-          user_data.em || user_data.ph ||
-          (user_data.client_ip_address && user_data.client_user_agent);
+        // Fallbacks pentru user_data
+        const user_data = {
+          em: parsed.user_data?.em || '',
+          client_ip_address: parsed.user_data?.client_ip_address || '',
+          client_user_agent: parsed.user_data?.client_user_agent || '',
+          fbp: parsed.user_data?.fbp || '',
+          fbc: parsed.user_data?.fbc || ''
+        };
 
-        if (!hasUserMatch) {
+        // ⚠️ Dacă nu există niciun identificator, nu trimitem către Meta
+        const hasIdentifiers = Object.values(user_data).some(value => !!value);
+        if (!hasIdentifiers) {
           console.warn('⚠️ Skipping event: missing user match info');
-
-          // 👉 Tot trimitem logul la Meta pentru debugging
-          const testPayload = {
-            data: [
-              {
-                event_name,
-                event_time,
-                user_data,
-                custom_data,
-                event_source_url,
-                action_source
-              }
-            ],
-            test_event_code: 'DEBUG' // for test traffic only
-          };
-
-          const testReq = https.request({
-            hostname: 'graph.facebook.com',
-            path: `/v17.0/${FB_PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-          }, testRes => {
-            let testData = '';
-            testRes.on('data', chunk => (testData += chunk));
-            testRes.on('end', () => {
-              console.log(`🧪 Meta debug (skipped): ${testRes.statusCode} - ${testData}`);
-              res.writeHead(200, { 'Content-Type': 'text/plain' });
-              res.end('Skipped: no user_data, sent to Meta debug');
-            });
-          });
-
-          testReq.on('error', err => {
-            console.error('❌ Meta debug error:', err.message);
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Meta debug error');
-          });
-
-          testReq.write(JSON.stringify(testPayload));
-          return testReq.end();
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end('Skipped Meta send (no match keys)');
         }
 
         const payload = {
@@ -117,13 +80,15 @@ const server = http.createServer((req, res) => {
             {
               event_name,
               event_time,
-              user_data,
-              custom_data,
               event_source_url,
-              action_source
+              action_source,
+              user_data,
+              custom_data
             }
           ]
         };
+
+        console.log('📦 Sending to Meta:', JSON.stringify(payload, null, 2));
 
         const options = {
           hostname: 'graph.facebook.com',
@@ -140,14 +105,14 @@ const server = http.createServer((req, res) => {
           fbRes.on('end', () => {
             console.log(`📬 Meta response: ${fbRes.statusCode} - ${fbData}`);
             res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Event sent to Meta');
+            res.end('Meta response sent');
           });
         });
 
         fbReq.on('error', err => {
-          console.error('❌ Meta API error:', err.message);
+          console.error('❌ Meta API error:', err);
           res.writeHead(500, { 'Content-Type': 'text/plain' });
-          res.end('Meta API request failed');
+          res.end('Meta API error');
         });
 
         fbReq.write(JSON.stringify(payload));
