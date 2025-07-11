@@ -30,7 +30,7 @@ const server = http.createServer((req, res) => {
     }
 
     let body = '';
-    req.on('data', chunk => (body += chunk.toString()));
+    req.on('data', chunk => body += chunk.toString());
     req.on('end', () => {
       if (!body || body.trim().length === 0) {
         console.error('❌ Empty request body');
@@ -40,14 +40,14 @@ const server = http.createServer((req, res) => {
 
       try {
         const parsed = JSON.parse(body);
-        console.log('✅ Parsed event:', parsed);
+        console.log('✅ Parsed event:', JSON.stringify(parsed, null, 2));
 
         const event_name = parsed.event_name || 'unknown';
         const event_time = parsed.event_time || Math.floor(Date.now() / 1000);
         const event_source_url = parsed.event_source_url || '';
         const action_source = parsed.action_source || 'website';
 
-        // Fallbacks pentru custom_data
+        // custom_data cu fallback
         const custom_data = {
           value: parsed.custom_data?.value || 0,
           currency: parsed.custom_data?.currency || 'EUR',
@@ -58,7 +58,7 @@ const server = http.createServer((req, res) => {
           ...parsed.custom_data
         };
 
-        // Fallbacks pentru user_data
+        // user_data cu fallback
         const user_data = {
           em: parsed.user_data?.em || '',
           client_ip_address: parsed.user_data?.client_ip_address || '',
@@ -67,8 +67,7 @@ const server = http.createServer((req, res) => {
           fbc: parsed.user_data?.fbc || ''
         };
 
-        // ⚠️ Dacă nu există niciun identificator, nu trimitem către Meta
-        const hasIdentifiers = Object.values(user_data).some(value => !!value);
+        const hasIdentifiers = Object.values(user_data).some(val => !!val);
         if (!hasIdentifiers) {
           console.warn('⚠️ Skipping event: missing user match info');
           res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -88,24 +87,22 @@ const server = http.createServer((req, res) => {
           ]
         };
 
-        console.log('📦 Sending to Meta:', JSON.stringify(payload, null, 2));
+        console.log('📦 Payload sent to Meta:\n', JSON.stringify(payload, null, 2));
 
         const options = {
           hostname: 'graph.facebook.com',
           path: `/v17.0/${FB_PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`,
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          }
+          headers: { 'Content-Type': 'application/json' }
         };
 
         const fbReq = https.request(options, fbRes => {
           let fbData = '';
-          fbRes.on('data', chunk => (fbData += chunk));
+          fbRes.on('data', chunk => fbData += chunk);
           fbRes.on('end', () => {
-            console.log(`📬 Meta response: ${fbRes.statusCode} - ${fbData}`);
+            console.log(`📬 Meta response [${fbRes.statusCode}]:\n${fbData}`);
             res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Meta response sent');
+            res.end('Meta response logged');
           });
         });
 
