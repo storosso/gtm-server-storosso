@@ -9,6 +9,7 @@ const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN;
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -47,17 +48,15 @@ const server = http.createServer((req, res) => {
         const event_source_url = parsed.event_source_url || '';
         const action_source = parsed.action_source || 'website';
 
-        // Fallback pentru user_data
         const user_data = {
           em: parsed.user_data?.em,
           ph: parsed.user_data?.ph,
-          client_ip_address: parsed.user_data?.client_ip_address,
-          client_user_agent: parsed.user_data?.client_user_agent,
           fbp: parsed.user_data?.fbp,
-          fbc: parsed.user_data?.fbc
+          fbc: parsed.user_data?.fbc,
+          client_ip_address: parsed.user_data?.client_ip_address,
+          client_user_agent: parsed.user_data?.client_user_agent
         };
 
-        // Fallback pentru custom_data
         const custom_data = {
           currency: parsed.custom_data?.currency || parsed.currency || 'EUR',
           value: parsed.custom_data?.value || parsed.value || 0,
@@ -66,15 +65,51 @@ const server = http.createServer((req, res) => {
           content_type: parsed.custom_data?.content_type || parsed.content_type || 'product'
         };
 
-        // Validare minimă pentru customer matching
         const hasUserMatch =
           user_data.em || user_data.ph ||
           (user_data.client_ip_address && user_data.client_user_agent);
 
         if (!hasUserMatch) {
           console.warn('⚠️ Skipping event: missing user match info');
-          res.writeHead(200, { 'Content-Type': 'text/plain' });
-          return res.end('Skipped: no user_data');
+
+          // 👉 Tot trimitem logul la Meta pentru debugging
+          const testPayload = {
+            data: [
+              {
+                event_name,
+                event_time,
+                user_data,
+                custom_data,
+                event_source_url,
+                action_source
+              }
+            ],
+            test_event_code: 'DEBUG' // for test traffic only
+          };
+
+          const testReq = https.request({
+            hostname: 'graph.facebook.com',
+            path: `/v17.0/${FB_PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          }, testRes => {
+            let testData = '';
+            testRes.on('data', chunk => (testData += chunk));
+            testRes.on('end', () => {
+              console.log(`🧪 Meta debug (skipped): ${testRes.statusCode} - ${testData}`);
+              res.writeHead(200, { 'Content-Type': 'text/plain' });
+              res.end('Skipped: no user_data, sent to Meta debug');
+            });
+          });
+
+          testReq.on('error', err => {
+            console.error('❌ Meta debug error:', err.message);
+            res.writeHead(500, { 'Content-Type': 'text/plain' });
+            res.end('Meta debug error');
+          });
+
+          testReq.write(JSON.stringify(testPayload));
+          return testReq.end();
         }
 
         const payload = {
@@ -110,7 +145,7 @@ const server = http.createServer((req, res) => {
         });
 
         fbReq.on('error', err => {
-          console.error('❌ Meta API error:', err);
+          console.error('❌ Meta API error:', err.message);
           res.writeHead(500, { 'Content-Type': 'text/plain' });
           res.end('Meta API request failed');
         });
