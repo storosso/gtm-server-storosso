@@ -9,7 +9,6 @@ const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN;
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
-  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -40,18 +39,43 @@ const server = http.createServer((req, res) => {
       }
 
       try {
-        const event = JSON.parse(body);
-        console.log('✅ Parsed event:', event);
+        const parsed = JSON.parse(body);
+        console.log('✅ Parsed event:', parsed);
 
-        // Extract Meta params
-        const {
-          event_name,
-          event_time = Math.floor(Date.now() / 1000),
-          user_data = {},
-          custom_data = {},
-          event_source_url,
-          action_source = 'website'
-        } = event;
+        const event_name = parsed.event_name || 'PageView';
+        const event_time = parsed.event_time || Math.floor(Date.now() / 1000);
+        const event_source_url = parsed.event_source_url || '';
+        const action_source = parsed.action_source || 'website';
+
+        // Fallback pentru user_data
+        const user_data = {
+          em: parsed.user_data?.em,
+          ph: parsed.user_data?.ph,
+          client_ip_address: parsed.user_data?.client_ip_address,
+          client_user_agent: parsed.user_data?.client_user_agent,
+          fbp: parsed.user_data?.fbp,
+          fbc: parsed.user_data?.fbc
+        };
+
+        // Fallback pentru custom_data
+        const custom_data = {
+          currency: parsed.custom_data?.currency || parsed.currency || 'EUR',
+          value: parsed.custom_data?.value || parsed.value || 0,
+          content_ids: parsed.custom_data?.content_ids || parsed.content_ids || [],
+          contents: parsed.custom_data?.contents || parsed.contents || [],
+          content_type: parsed.custom_data?.content_type || parsed.content_type || 'product'
+        };
+
+        // Validare minimă pentru customer matching
+        const hasUserMatch =
+          user_data.em || user_data.ph ||
+          (user_data.client_ip_address && user_data.client_user_agent);
+
+        if (!hasUserMatch) {
+          console.warn('⚠️ Skipping event: missing user match info');
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end('Skipped: no user_data');
+        }
 
         const payload = {
           data: [
