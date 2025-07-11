@@ -47,7 +47,6 @@ const server = http.createServer((req, res) => {
         const event_source_url = parsed.event_source_url || '';
         const action_source = parsed.action_source || 'website';
 
-        // custom_data cu fallback
         const custom_data = {
           value: parsed.custom_data?.value || 0,
           currency: parsed.custom_data?.currency || 'EUR',
@@ -58,7 +57,6 @@ const server = http.createServer((req, res) => {
           ...parsed.custom_data
         };
 
-        // user_data cu fallback
         const user_data = {
           em: parsed.user_data?.em || '',
           client_ip_address: parsed.user_data?.client_ip_address || '',
@@ -66,13 +64,6 @@ const server = http.createServer((req, res) => {
           fbp: parsed.user_data?.fbp || '',
           fbc: parsed.user_data?.fbc || ''
         };
-
-        const hasIdentifiers = Object.values(user_data).some(val => !!val);
-        if (!hasIdentifiers) {
-          console.warn('⚠️ Skipping event: missing user match info');
-          res.writeHead(200, { 'Content-Type': 'text/plain' });
-          return res.end('Skipped Meta send (no match keys)');
-        }
 
         const payload = {
           data: [
@@ -87,7 +78,7 @@ const server = http.createServer((req, res) => {
           ]
         };
 
-        console.log('📦 Payload sent to Meta:\n', JSON.stringify(payload, null, 2));
+        console.log('📦 Payload to Meta:\n', JSON.stringify(payload, null, 2));
 
         const options = {
           hostname: 'graph.facebook.com',
