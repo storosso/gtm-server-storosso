@@ -1,17 +1,17 @@
 const http = require('http');
 const url = require('url');
 
-const PORT = process.env.PORT || 8080;
+const PORT = Number(process.env.PORT) || 8080;
 
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
-  // CORS headers (production safe)
-  res.setHeader('Access-Control-Allow-Origin', 'https://storosso.com');
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Origin, Accept');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Preflight response
+  // Handle preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
@@ -23,7 +23,7 @@ const server = http.createServer((req, res) => {
     return res.end('OK');
   }
 
-  // GTM Server Tag endpoint
+  // GTM collect routes
   if (pathname === '/collect' || pathname === '/g/collect') {
     if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'text/plain' });
@@ -31,22 +31,26 @@ const server = http.createServer((req, res) => {
     }
 
     let body = '';
-    req.on('data', chunk => { body += chunk; });
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
 
     req.on('end', () => {
       if (!body || body.trim().length === 0) {
-        console.error('❌ Empty or invalid JSON body');
+        console.error('❌ Empty request body');
         res.writeHead(400, { 'Content-Type': 'text/plain' });
-        return res.end('Invalid body');
+        return res.end('Missing or empty body');
       }
 
       try {
-        const json = JSON.parse(body);
-        console.log('✅ Received event:', JSON.stringify(json, null, 2));
+        const parsed = JSON.parse(body);
+        console.log('✅ Parsed event:', parsed);
+
+        // Forward to GTM Server Container (your tag does the rest)
         res.writeHead(200, { 'Content-Type': 'text/plain' });
-        return res.end('Event received');
-      } catch (e) {
-        console.error('❌ JSON parse error:', e.message);
+        return res.end('OK');
+      } catch (err) {
+        console.error('❌ Failed to parse JSON:', err.message);
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         return res.end('Invalid JSON');
       }
@@ -55,11 +59,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Fallback
+  // All other routes
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('Not Found');
 });
 
 server.listen(PORT, () => {
-  console.log(`✅ GTM Server running on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
 });
