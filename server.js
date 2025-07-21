@@ -26,7 +26,6 @@ const server = http.createServer((req, res) => {
 
   // Main endpoint
   if (pathname === '/collect' || pathname === '/g/collect') {
-    // ✅ Verifică Content-Type
     if (req.headers['content-type'] !== 'application/json') {
       res.writeHead(415).end('Unsupported Media Type');
       return;
@@ -51,15 +50,23 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      // ✅ Fallback pentru IP real
       const realIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
 
-      // ✅ Construiește contents și payload
       const contents = (p.custom_data?.contents || p.ecommerce?.add?.products || []).map(i => ({
         id:         i.id || i.item_id || 'unknown',
         quantity:   i.quantity || 1,
         item_price: i.item_price || i.price || 0
       }));
+
+      const userData = {
+        ...(p.user_data?.em           ? { em: p.user_data.em } : {}),
+        ...(p.user_data?.ph           ? { ph: p.user_data.ph } : {}),
+        ...(p.user_data?.external_id  ? { external_id: p.user_data.external_id } : {}),
+        client_ip_address: p.user_data?.client_ip_address || realIp,
+        client_user_agent: p.user_data?.client_user_agent || req.headers['user-agent'],
+        fbp:               p.user_data?.fbp               || '',
+        fbc:               p.user_data?.fbc               || ''
+      };
 
       const payload = {
         data: [{
@@ -67,13 +74,7 @@ const server = http.createServer((req, res) => {
           event_time:       p.event_time       || Math.floor(Date.now() / 1000),
           event_source_url: p.event_source_url || '',
           action_source:    p.action_source    || 'website',
-          user_data: {
-            em:                p.user_data?.em                || '',
-            client_ip_address: p.user_data?.client_ip_address || realIp,
-            client_user_agent: p.user_data?.client_user_agent || req.headers['user-agent'],
-            fbp:               p.user_data?.fbp               || '',
-            fbc:               p.user_data?.fbc               || ''
-          },
+          user_data:        userData,
           custom_data: {
             value:       p.custom_data?.value ?? contents.reduce((s, c) => s + c.quantity * c.item_price, 0),
             currency:    p.custom_data?.currency || p.ecommerce?.currencyCode || 'EUR',
@@ -83,7 +84,6 @@ const server = http.createServer((req, res) => {
         }]
       };
 
-      // ✅ Log payload complet
       console.log('📦 Sending to Meta:\n', JSON.stringify(payload, null, 2));
 
       const opts = {
@@ -93,6 +93,7 @@ const server = http.createServer((req, res) => {
         headers:  { 'Content-Type': 'application/json' },
         timeout:  5000
       };
+
       console.log('🚀 Meta request options:', opts);
 
       const fbReq = https.request(opts, fbRes => {
