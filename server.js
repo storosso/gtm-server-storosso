@@ -14,15 +14,29 @@ if (!FB_PIXEL_ID || !FB_ACCESS_TOKEN) {
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // ---------- CORS ----------
+  const origin = req.headers.origin || '';
+  res.setHeader('Vary', 'Origin');
+  if (origin) {
+    // IMPORTANT: eco origin-ul cererii ca să permitem credentials
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    // fără origin → safe wildcard (fără credentials)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] || 'Content-Type'
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
   }
+  // --------------------------
 
   if (pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -31,7 +45,8 @@ const server = http.createServer((req, res) => {
 
   if (pathname === '/collect' || pathname === '/g/collect') {
     const ct = (req.headers['content-type'] || '').toLowerCase();
-    if (!ct.startsWith('application/json')) {
+    // acceptăm application/json (+ charset) și text/plain (sendBeacon)
+    if (!(ct.startsWith('application/json') || ct.startsWith('text/plain'))) {
       res.writeHead(415, { 'Content-Type': 'text/plain' });
       return res.end('Unsupported Media Type');
     }
@@ -50,17 +65,15 @@ const server = http.createServer((req, res) => {
         return safeEnd(res, 400, 'Invalid JSON');
       }
 
-      // If caller already sent {data:[...]} — pass through
-      let events = [];
-      if (Array.isArray(incoming?.data)) {
-        events = incoming.data;
-      } else {
-        events = [incoming];
-      }
+      // Dacă vine deja { data: [...] } o trecem direct
+      const events = Array.isArray(incoming?.data) ? incoming.data : [incoming];
 
-      const realIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+      const realIp =
+        (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+        req.socket.remoteAddress ||
+        '';
 
-      // normalizare nume eveniment (camelCase -> CamelCase)
+      // normalizare nume eveniment (lowercase → CamelCase)
       const nameMap = {
         view_content: 'ViewContent',
         add_to_cart: 'AddToCart',
@@ -68,23 +81,26 @@ const server = http.createServer((req, res) => {
         purchase: 'Purchase',
         page_view: 'PageView'
       };
-      function normEventName(n) {
+      const normEventName = n => {
         if (!n) return 'CustomEvent';
         const key = String(n).toLowerCase();
-        return nameMap[key] || n; // dacă e deja corect, îl lăsăm
-      }
+        return nameMap[key] || n;
+      };
 
-      function num(x) {
+      const num = x => {
         if (typeof x === 'number') return x;
         if (x == null) return 0;
-        const s = String(x).replace(/[^\d.,-]/g, '').replace(/\.(?=.*\.)/g, '').replace(',', '.');
+        const s = String(x)
+          .replace(/[^\d.,-]/g, '')
+          .replace(/\.(?=.*\.)/g, '')
+          .replace(',', '.');
         const v = parseFloat(s);
         return isNaN(v) ? 0 : v;
-      }
+      };
 
-      // transformăm fiecare event într-unul compatibil Graph
-      const metaEvents = events.map((p) => {
-        const contentsSrc = (p.custom_data?.contents || p.ecommerce?.add?.products || []);
+      // transformăm fiecare event într-unul compatibil Meta
+      const metaEvents = events.map(p => {
+        const contentsSrc = p.custom_data?.contents || p.ecommerce?.add?.products || [];
         const contents = (Array.isArray(contentsSrc) ? contentsSrc : []).map(i => ({
           id: i.id || i.item_id || 'unknown',
           quantity: Number(i.quantity || 1),
@@ -101,7 +117,6 @@ const server = http.createServer((req, res) => {
           fbc: p.user_data?.fbc || ''
         };
 
-        // value & currency
         const value =
           p.custom_data?.value != null
             ? num(p.custom_data.value)
@@ -109,7 +124,6 @@ const server = http.createServer((req, res) => {
 
         const currency = p.custom_data?.currency || p.ecommerce?.currencyCode || 'EUR';
 
-        // content_ids fallback
         const content_ids =
           p.custom_data?.content_ids && Array.isArray(p.custom_data.content_ids)
             ? p.custom_data.content_ids
