@@ -241,7 +241,7 @@ function forwardToTikTok(ctx){
     const { events, normEventName, num, realIp, reqUA } = ctx;
 
     try {
-      // map all events (TikTok v1.3 schema)
+      // TikTok v1.3 schema: event + timestamp + context + properties
       const tkEvents = events.map(p => {
         const event = normEventName(p.event_name || 'CustomEvent');   // e.g. ViewContent
         const timestamp = new Date(
@@ -283,7 +283,7 @@ function forwardToTikTok(ctx){
         };
       });
 
-      // body required by /open_api/v1.3/event/track/
+      // body for /open_api/v1.3/event/track/
       const body = {
         event_source: 'web',
         event_source_id: TIKTOK_PIXEL_ID,
