@@ -80,7 +80,7 @@ const server = http.createServer((req, res) => {
       const nameMap = {
         view_content:'ViewContent', add_to_cart:'AddToCart',
         begin_checkout:'BeginCheckout', purchase:'Purchase',
-        page_view:'PageView'
+        page_view:'PageView', initiate_checkout:'InitiateCheckout'
       };
       const normEventName = n => n ? (nameMap[String(n).toLowerCase()] || n) : 'CustomEvent';
       const num = x => {
@@ -112,14 +112,12 @@ const server = http.createServer((req, res) => {
       if (toTikTok.length) {
         jobs.push(forwardToTikTok({
           events: toTikTok,
-          normEventName, num, realIp, reqUA: (req.headers['user-agent'] || ''),
-          reqUrl: incoming.event_source_url || ''
+          normEventName, num, realIp, reqUA: (req.headers['user-agent'] || '')
         }));
       }
 
       try {
         const results = await Promise.all(jobs);
-        // results = [{platform:'meta', statusCode, body}, {platform:'tiktok', statusCode, body}]
         const payload = {};
         for (const r of results) {
           payload[r.platform] = {
@@ -258,13 +256,15 @@ function forwardToTikTok(ctx){
           price: num(i.price != null ? i.price : i.item_price)
         }));
 
+        const ad = (p.user_data && p.user_data.ttclid) ? { callback: p.user_data.ttclid } : undefined;
+
         const tiktokPayload = {
-          event_source: 'WEB',
-          event_source_id: TIKTOK_PIXEL_ID,     // Pixel code
-          event_type: eventType,                // ViewContent / AddToCart / InitiateCheckout / Purchase
-          event_id: p.event_id || undefined,    // for dedup
-          event_time: isoTime,                  // ISO8601
-          ad: { callback: (p.user_data && p.user_data.ttclid) || undefined },
+          event_source: 'web',                         // <-- FIX: must be lowercase
+          event_source_id: TIKTOK_PIXEL_ID,            // Pixel code
+          event_type: eventType,                       // ViewContent / AddToCart / InitiateCheckout / Purchase
+          event_id: p.event_id || undefined,           // for dedup
+          event_time: isoTime,                         // ISO8601
+          ad,                                          // only if ttclid exists
           page: {
             url: p.event_source_url || '',
             referrer: p.referrer || ''
@@ -293,7 +293,6 @@ function forwardToTikTok(ctx){
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            // TikTok acceptă header-ul Access-Token pentru autentificare
             'Access-Token': TIKTOK_ACCESS_TOKEN
           },
           timeout: 15000
@@ -309,7 +308,6 @@ function forwardToTikTok(ctx){
       }
     }
 
-    // Returnăm ultimul rezultat (sau un rezumat)
     const last = results[results.length-1] || {statusCode:200, body:'{}'};
     resolve({ platform:'tiktok', statusCode: last.statusCode, body: last.body });
   });
