@@ -1,4 +1,4 @@
-// server.js – Meta + TikTok forwarder (Railway)
+// server.js – Meta + TikTok forwarder (Railway) – v1.3 compat (int event_time)
 
 const http = require('http');
 const url = require('url');
@@ -166,7 +166,7 @@ function forwardToMeta(ctx){
         item_price: num(i.item_price != null ? i.item_price : i.price)
       }));
 
-    const user_data = {
+      const user_data = {
         ...(p.user_data?.em ? { em: p.user_data.em } : {}),
         ...(p.user_data?.ph ? { ph: p.user_data.ph } : {}),
         ...(p.user_data?.external_id ? { external_id: p.user_data.external_id } : {}),
@@ -241,11 +241,13 @@ function forwardToTikTok(ctx){
     const { events, normEventName, num, realIp, reqUA } = ctx;
 
     try {
-      console.log('TT v1.3-compat build');
+      console.log('TT v1.3-compat (int event_time)');
 
       const tkEvents = events.map(p => {
-        const evName = normEventName(p.event_name || 'CustomEvent'); // ex: ViewContent
-        const iso = new Date(Number(p.event_time || Math.floor(Date.now()/1000)) * 1000).toISOString();
+        // sec (integer) pentru compat, ISO pentru v1.3
+        const sec = Number(p.event_time || Math.floor(Date.now()/1000));
+        const iso = new Date(sec * 1000).toISOString();
+        const evName = normEventName(p.event_name || 'CustomEvent');
 
         const itemsSrc = p.custom_data?.contents || [];
         const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
@@ -258,13 +260,13 @@ function forwardToTikTok(ctx){
         const ad = (p.user_data && p.user_data.ttclid) ? { callback: p.user_data.ttclid } : undefined;
 
         return {
-          // v1.3 (actual)
+          // v1.3
           event: evName,
           timestamp: iso,
 
-          // compat (unele erori vechi cer event_time)
+          // compat cu validarea care cere integer
           event_type: evName,
-          event_time: iso,
+          event_time: sec,
 
           event_id: p.event_id || undefined,
           context: {
