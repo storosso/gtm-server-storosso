@@ -47,7 +47,7 @@ const server = http.createServer((req, res) => {
   }
   // --------------------------
 
-  // Root & healthz -> 200 (pt. Railway health-check)
+  // Root & healthz -> 200
   if (pathname === '/' || pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('OK');
@@ -55,7 +55,7 @@ const server = http.createServer((req, res) => {
 
   if (pathname === '/collect' || pathname === '/g/collect') {
     const ct = (req.headers['content-type'] || '').toLowerCase();
-    // acceptă JSON (cu charset) și text/plain (pentru sendBeacon)
+    // accept JSON (+charset) & text/plain (sendBeacon)
     if (!(ct.startsWith('application/json') || ct.startsWith('text/plain'))) {
       res.writeHead(415, { 'Content-Type': 'text/plain' });
       return res.end('Unsupported Media Type');
@@ -79,8 +79,8 @@ const server = http.createServer((req, res) => {
       // ---- helpers (common) ----
       const nameMap = {
         view_content:'ViewContent', add_to_cart:'AddToCart',
-        begin_checkout:'BeginCheckout', purchase:'Purchase',
-        page_view:'PageView', initiate_checkout:'InitiateCheckout'
+        begin_checkout:'BeginCheckout', initiate_checkout:'InitiateCheckout',
+        purchase:'Purchase', page_view:'PageView'
       };
       const normEventName = n => n ? (nameMap[String(n).toLowerCase()] || n) : 'CustomEvent';
       const num = x => {
@@ -90,7 +90,7 @@ const server = http.createServer((req, res) => {
         const v = parseFloat(s); return isNaN(v) ? 0 : v;
       };
 
-      // --- separă fluxurile după platform ---
+      // --- split by platform ---
       const toTikTok = [];
       const toMeta   = [];
       for (const ev of events) {
@@ -99,7 +99,7 @@ const server = http.createServer((req, res) => {
         else toMeta.push(ev);
       }
 
-      // ---- forward promises (can be both) ----
+      // ---- forward (both possible) ----
       const jobs = [];
 
       if (toMeta.length) {
@@ -143,7 +143,7 @@ server.listen(PORT, () => {
   console.log(`# GTM Server running on port ${PORT}`);
 });
 
-// graceful logs (utile dacă Railway trimite SIGTERM)
+// graceful logs
 process.on('SIGTERM', () => { console.log('🔻 SIGTERM received'); process.exit(0); });
 process.on('SIGINT',  () => { console.log('🔻 SIGINT received');  process.exit(0); });
 
@@ -241,7 +241,6 @@ function forwardToTikTok(ctx){
   return new Promise(async (resolve, reject) => {
     const { events, normEventName, num, realIp, reqUA } = ctx;
 
-    // Trimitem evenimentele la TikTok unul câte unul (cel mai robust)
     const results = [];
     for (const p of events) {
       try{
@@ -258,8 +257,9 @@ function forwardToTikTok(ctx){
 
         const ad = (p.user_data && p.user_data.ttclid) ? { callback: p.user_data.ttclid } : undefined;
 
-        const tiktokPayload = {
-          event_source: 'web',                         // <-- FIX: must be lowercase
+        // single event object
+        const tiktokEvent = {
+          event_source: 'web',
           event_source_id: TIKTOK_PIXEL_ID,            // Pixel code
           event_type: eventType,                       // ViewContent / AddToCart / InitiateCheckout / Purchase
           event_id: p.event_id || undefined,           // for dedup
@@ -270,7 +270,7 @@ function forwardToTikTok(ctx){
             referrer: p.referrer || ''
           },
           user: {
-            email: (p.user_data && p.user_data.em) || undefined,       // already SHA256 if you send so
+            email: (p.user_data && p.user_data.em) || undefined,       // hashed if you send it
             external_id: (p.user_data && p.user_data.external_id) || undefined,
             ip: (p.user_data && p.user_data.client_ip_address) || realIp || undefined,
             user_agent: (p.user_data && p.user_data.client_user_agent) || reqUA || undefined
@@ -285,7 +285,10 @@ function forwardToTikTok(ctx){
           test_event_code: TIKTOK_TEST_EVENT_CODE || undefined
         };
 
-        console.log('📦 Sending to TikTok:\n' + JSON.stringify(tiktokPayload, null, 2));
+        // v1.3 requires { data: [...] }
+        const body = { data: [ tiktokEvent ] };
+
+        console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
 
         const options = {
           hostname: 'business-api.tiktok.com',
@@ -298,7 +301,7 @@ function forwardToTikTok(ctx){
           timeout: 15000
         };
 
-        const tkBody = await httpRequestJSON(options, tiktokPayload);
+        const tkBody = await httpRequestJSON(options, body);
         console.log('🟦 TikTok response:', tkBody.statusCode, tkBody.body);
         results.push({ statusCode: tkBody.statusCode, body: tkBody.body });
 
