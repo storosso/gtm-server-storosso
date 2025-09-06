@@ -55,7 +55,6 @@ const server = http.createServer((req, res) => {
 
   if (pathname === '/collect' || pathname === '/g/collect') {
     const ct = (req.headers['content-type'] || '').toLowerCase();
-    // accept JSON (+charset) & text/plain (sendBeacon)
     if (!(ct.startsWith('application/json') || ct.startsWith('text/plain'))) {
       res.writeHead(415, { 'Content-Type': 'text/plain' });
       return res.end('Unsupported Media Type');
@@ -125,7 +124,7 @@ const server = http.createServer((req, res) => {
             body: tryParseJSON(r.body)
           };
         }
-        const status = results.some(r => (r.statusCode >= 400)) ? 207 : 200; // Multi-Status if any failed
+        const status = results.some(r => (r.statusCode >= 400)) ? 207 : 200;
         safeEnd(res, status, JSON.stringify(payload), 'application/json');
       } catch (err) {
         console.error('❌ Forward error:', err);
@@ -242,10 +241,12 @@ function forwardToTikTok(ctx){
     const { events, normEventName, num, realIp, reqUA } = ctx;
 
     try {
-      // map all events (per TikTok schema)
+      // map all events (TikTok v1.3 schema)
       const tkEvents = events.map(p => {
-        const eventType = normEventName(p.event_name || 'CustomEvent');
-        const isoTime = new Date(Number(p.event_time || Math.floor(Date.now()/1000)) * 1000).toISOString();
+        const event = normEventName(p.event_name || 'CustomEvent');   // e.g. ViewContent
+        const timestamp = new Date(
+          Number(p.event_time || Math.floor(Date.now()/1000)) * 1000
+        ).toISOString();
 
         const itemsSrc = p.custom_data?.contents || [];
         const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
@@ -258,16 +259,19 @@ function forwardToTikTok(ctx){
         const ad = (p.user_data && p.user_data.ttclid) ? { callback: p.user_data.ttclid } : undefined;
 
         return {
-          event_type: eventType,                    // ViewContent / AddToCart / InitiateCheckout / Purchase
-          event_id: p.event_id || undefined,        // dedup
-          event_time: isoTime,                      // ISO8601
-          ad,                                       // only if ttclid exists
-          page: { url: p.event_source_url || '', referrer: p.referrer || '' },
-          user: {
-            email:        p.user_data?.em || undefined,            // hashed if you send it
-            external_id:  p.user_data?.external_id || undefined,
-            ip:           p.user_data?.client_ip_address || realIp || undefined,
-            user_agent:   p.user_data?.client_user_agent || reqUA || undefined
+          event,                                  // REQUIRED
+          event_id: p.event_id || undefined,      // for dedup
+          timestamp,                              // REQUIRED (ISO8601)
+          context: {
+            ...(ad ? { ad } : {}),
+            page: { url: p.event_source_url || '', referrer: p.referrer || '' },
+            user: {
+              external_id: p.user_data?.external_id || undefined,
+              email:       p.user_data?.em || undefined,      // hashed if provided
+              phone:       p.user_data?.ph || undefined,      // hashed if provided
+              ip:          p.user_data?.client_ip_address || realIp || undefined,
+              user_agent:  p.user_data?.client_user_agent || reqUA || undefined
+            }
           },
           properties: {
             currency:     p.custom_data?.currency || 'EUR',
@@ -279,7 +283,7 @@ function forwardToTikTok(ctx){
         };
       });
 
-      // body required by v1.3: event_source + event_source_id at top; events in data[]
+      // body required by /open_api/v1.3/event/track/
       const body = {
         event_source: 'web',
         event_source_id: TIKTOK_PIXEL_ID,
