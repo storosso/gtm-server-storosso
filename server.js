@@ -47,7 +47,7 @@ const server = http.createServer((req, res) => {
   }
   // --------------------------
 
-  // Root & healthz -> 200
+  // Root & healthz
   if (pathname === '/' || pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('OK');
@@ -241,14 +241,14 @@ function forwardToTikTok(ctx){
   return new Promise(async (resolve, reject) => {
     const { events, normEventName, num, realIp, reqUA } = ctx;
 
-    const results = [];
-    for (const p of events) {
-      try{
+    try {
+      // map all events (per TikTok schema)
+      const tkEvents = events.map(p => {
         const eventType = normEventName(p.event_name || 'CustomEvent');
-        const isoTime = new Date(Number(p.event_time || Math.floor(Date.now()/1000))*1000).toISOString();
+        const isoTime = new Date(Number(p.event_time || Math.floor(Date.now()/1000)) * 1000).toISOString();
 
         const itemsSrc = p.custom_data?.contents || [];
-        const items = (Array.isArray(itemsSrc)?itemsSrc:[]).map(i=>({
+        const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
           content_id: i.content_id || i.id || i.item_id || 'unknown',
           content_name: i.content_name || i.name || undefined,
           quantity: Number(i.quantity || 1),
@@ -257,62 +257,57 @@ function forwardToTikTok(ctx){
 
         const ad = (p.user_data && p.user_data.ttclid) ? { callback: p.user_data.ttclid } : undefined;
 
-        // single event object
-        const tiktokEvent = {
-          event_source: 'web',
-          event_source_id: TIKTOK_PIXEL_ID,            // Pixel code
-          event_type: eventType,                       // ViewContent / AddToCart / InitiateCheckout / Purchase
-          event_id: p.event_id || undefined,           // for dedup
-          event_time: isoTime,                         // ISO8601
-          ad,                                          // only if ttclid exists
-          page: {
-            url: p.event_source_url || '',
-            referrer: p.referrer || ''
-          },
+        return {
+          event_type: eventType,                    // ViewContent / AddToCart / InitiateCheckout / Purchase
+          event_id: p.event_id || undefined,        // dedup
+          event_time: isoTime,                      // ISO8601
+          ad,                                       // only if ttclid exists
+          page: { url: p.event_source_url || '', referrer: p.referrer || '' },
           user: {
-            email: (p.user_data && p.user_data.em) || undefined,       // hashed if you send it
-            external_id: (p.user_data && p.user_data.external_id) || undefined,
-            ip: (p.user_data && p.user_data.client_ip_address) || realIp || undefined,
-            user_agent: (p.user_data && p.user_data.client_user_agent) || reqUA || undefined
+            email:        p.user_data?.em || undefined,            // hashed if you send it
+            external_id:  p.user_data?.external_id || undefined,
+            ip:           p.user_data?.client_ip_address || realIp || undefined,
+            user_agent:   p.user_data?.client_user_agent || reqUA || undefined
           },
           properties: {
-            currency: p.custom_data?.currency || 'EUR',
-            value: num(p.custom_data?.value),
-            order_id: p.custom_data?.order_id,
+            currency:     p.custom_data?.currency || 'EUR',
+            value:        num(p.custom_data?.value),
+            order_id:     p.custom_data?.order_id,
             content_type: p.custom_data?.content_type || 'product',
-            contents: items
-          },
-          test_event_code: TIKTOK_TEST_EVENT_CODE || undefined
+            contents:     items
+          }
         };
+      });
 
-        // v1.3 requires { data: [...] }
-        const body = { data: [ tiktokEvent ] };
+      // body required by v1.3: event_source + event_source_id at top; events in data[]
+      const body = {
+        event_source: 'web',
+        event_source_id: TIKTOK_PIXEL_ID,
+        data: tkEvents,
+        ...(TIKTOK_TEST_EVENT_CODE ? { test_event_code: TIKTOK_TEST_EVENT_CODE } : {})
+      };
 
-        console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
+      console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
 
-        const options = {
-          hostname: 'business-api.tiktok.com',
-          path: '/open_api/v1.3/event/track/',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Access-Token': TIKTOK_ACCESS_TOKEN
-          },
-          timeout: 15000
-        };
+      const options = {
+        hostname: 'business-api.tiktok.com',
+        path: '/open_api/v1.3/event/track/',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Token': TIKTOK_ACCESS_TOKEN
+        },
+        timeout: 15000
+      };
 
-        const tkBody = await httpRequestJSON(options, body);
-        console.log('🟦 TikTok response:', tkBody.statusCode, tkBody.body);
-        results.push({ statusCode: tkBody.statusCode, body: tkBody.body });
+      const tkBody = await httpRequestJSON(options, body);
+      console.log('🟦 TikTok response:', tkBody.statusCode, tkBody.body);
+      resolve({ platform:'tiktok', statusCode: tkBody.statusCode, body: tkBody.body });
 
-      }catch(err){
-        console.error('❌ TikTok send error:', err);
-        results.push({ statusCode: 502, body: JSON.stringify({error:'tiktok_send_failed', message: String(err && err.message || err)}) });
-      }
+    } catch (err) {
+      console.error('❌ TikTok send error:', err);
+      reject(err);
     }
-
-    const last = results[results.length-1] || {statusCode:200, body:'{}'};
-    resolve({ platform:'tiktok', statusCode: last.statusCode, body: last.body });
   });
 }
 
