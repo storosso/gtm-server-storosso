@@ -18,8 +18,6 @@ if (!FB_PIXEL_ID || !FB_ACCESS_TOKEN) {
 // ---------- TIKTOK env ----------
 const TIKTOK_PIXEL_ID = process.env.TIKTOK_PIXEL_ID;           // ex. D2TVRQBC7U1Q4B3YJQ0
 const TIKTOK_ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;   // Events API access token
-const TIKTOK_TEST_EVENT_CODE = process.env.TIKTOK_TEST_EVENT_CODE || '';
-
 if (!TIKTOK_PIXEL_ID || !TIKTOK_ACCESS_TOKEN) {
   console.warn('⚠️ TIKTOK_PIXEL_ID or TIKTOK_ACCESS_TOKEN missing in env!');
 }
@@ -293,9 +291,11 @@ function forwardToTikTok(ctx){
       const body = {
         event_source: 'web',
         event_source_id: TIKTOK_PIXEL_ID,
-        data: tkEvents,
-        ...(TIKTOK_TEST_EVENT_CODE ? { test_event_code: TIKTOK_TEST_EVENT_CODE } : {})
+        data: tkEvents
       };
+
+      // safety: elimină orice câmp de test introdus accidental
+      if ('test_event_code' in body) delete body.test_event_code;
 
       console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
 
