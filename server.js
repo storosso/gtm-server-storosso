@@ -1,6 +1,7 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.4
+// server.js – Meta + TikTok forwarder (Railway) – v1.5
 // - filtrează evenimentele de preview (gtm-msr, Tag Assistant)
 // - trimite doar evenimente reale (storosso.com) spre Meta / TikTok
+// - loghează TOATE evenimentele care intră (inclusiv engaged_15s)
 
 const http = require('http');
 const url = require('url');
@@ -53,8 +54,25 @@ function isPreviewOrBotEvent(ev) {
   return false;
 }
 
-// detectează evenimente complet goale din punct de vedere ecommerce
+// detectează evenimente „goale” DOAR pentru evenimentele ecommerce clasice
+// (ViewContent, AddToCart, BeginCheckout, InitiateCheckout, Purchase).
+// Pentru evenimente custom (ex. engaged_15s) NU filtrăm – ele trebuie să treacă mai departe.
 function isEmptyCommerce(ev) {
+  const name = String(ev.event_name || '').toLowerCase();
+
+  const ecommerceNames = [
+    'viewcontent',
+    'addtocart',
+    'begincheckout',
+    'initiatecheckout',
+    'purchase'
+  ];
+
+  // dacă nu este un event ecommerce clasic, nu îl tratăm ca „empty commerce”
+  if (!ecommerceNames.includes(name)) {
+    return false;
+  }
+
   const cd = ev.custom_data || {};
   const contents = Array.isArray(cd.contents) ? cd.contents : [];
   const contentIds = Array.isArray(cd.content_ids) ? cd.content_ids : [];
@@ -130,6 +148,9 @@ const server = http.createServer((req, res) => {
         req.socket.remoteAddress ||
         '';
 
+      // log generic pentru fiecare request /collect (număr de events)
+      console.log('🔔 New /collect request – events count:', events.length);
+
       // ---- helpers (comune Meta + TikTok) ----
       const nameMap = {
         view_content: 'ViewContent',
@@ -158,20 +179,36 @@ const server = http.createServer((req, res) => {
       const toMeta = [];
 
       for (const ev of events) {
-        // 1) igoră preview / tag assistant
+        const rawName = ev.event_name || 'unknown';
+        const srcUrl = ev.event_source_url || '';
+        const platformLabel = ev.platform || 'meta';
+
+        // log de bază pentru fiecare event, ca să apară SIGUR în Railway
+        console.log(
+          '🔔 Incoming event:',
+          rawName,
+          '| platform:',
+          platformLabel,
+          '| url:',
+          srcUrl || '(no url)'
+        );
+
+        // 1) ignoră preview / tag assistant
         if (isPreviewOrBotEvent(ev)) {
-          // log foarte scurt o singură linie, fără payload
-          console.log('⚪ Ignored preview/test event from:', ev.event_source_url || '(no url)');
+          console.log('⚪ Ignored preview/test event from:', srcUrl || '(no url)');
           continue;
         }
 
-        // 2) igoră evenimente complet goale (fără value / contents / ids)
+        // 2) ignoră evenimente ecommerce complet goale (dar NU și evenimente custom gen engaged_15s)
         if (isEmptyCommerce(ev)) {
-          console.log('⚪ Ignored empty-commerce event (no value/contents/content_ids).');
+          console.log(
+            '⚪ Ignored empty-commerce event (no value/contents/content_ids):',
+            rawName
+          );
           continue;
         }
 
-        const platform = String(ev.platform || 'meta').toLowerCase();
+        const platform = String(platformLabel || 'meta').toLowerCase();
         if (platform === 'tiktok') toTikTok.push(ev);
         else toMeta.push(ev);
       }
@@ -491,4 +528,3 @@ function httpRequestJSON(options, payload) {
     req.end();
   });
 }
-
