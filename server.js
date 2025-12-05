@@ -1,7 +1,8 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.5 NO-FILTER
-// - filtrează DOAR evenimentele de preview (gtm-msr, Tag Assistant)
-// - NU mai blochează niciun eveniment ecommerce (ViewContent, AddToCart etc.)
-// - loghează TOATE evenimentele care intră (inclusiv engaged_15s)
+// server.js – Meta + TikTok forwarder (Railway) – v1.7
+// - filtrează DOAR evenimentele de preview (gtm-msr, Tag Assistant) – nu le trimite și nu le loghează ca "Incoming"
+// - NU blochează evenimente ecommerce (ViewContent, AddToCart etc.)
+// - evenimentele cu prefix tt_ și video_play_* merg DOAR către TikTok, NU către Meta
+// - loghează TOATE evenimentele reale care intră
 
 const http = require('http');
 const url = require('url');
@@ -158,7 +159,18 @@ const server = http.createServer((req, res) => {
         const srcUrl = ev.event_source_url || '';
         const platformLabel = ev.platform || 'meta';
 
-        // log de bază pentru fiecare event, ca să apară SIGUR în Railway
+        // 1) ignoră preview / Tag Assistant ÎNAINTE de log
+        if (isPreviewOrBotEvent(ev)) {
+          console.log(
+            '⚪ Ignored preview/test event:',
+            rawName,
+            '| url:',
+            srcUrl || '(no url)'
+          );
+          continue;
+        }
+
+        // log de bază DOAR pentru evenimente reale
         console.log(
           '🔔 Incoming event:',
           rawName,
@@ -168,20 +180,28 @@ const server = http.createServer((req, res) => {
           srcUrl || '(no url)'
         );
 
-        // 1) ignoră preview / tag assistant
-        if (isPreviewOrBotEvent(ev)) {
-          console.log('⚪ Ignored preview/test event from:', srcUrl || '(no url)');
-          continue;
-        }
-
         // 2) NU mai ignorăm evenimente ecommerce goale – vrem să vedem tot
         if (isEmptyCommerce(ev)) {
           console.log('⚪ (no-op) empty-commerce check – currently disabled');
         }
 
         const platform = String(platformLabel || 'meta').toLowerCase();
-        if (platform === 'tiktok') toTikTok.push(ev);
-        else toMeta.push(ev);
+        const lowerName = String(rawName).toLowerCase();
+
+        // 🔴 TikTok-only: toate evenimentele care încep cu tt_ sau video_play_
+        const isTikTokOnly =
+          lowerName.startsWith('tt_') || lowerName.startsWith('video_play_');
+
+        if (platform === 'tiktok' || isTikTokOnly) {
+          // trimitem către TikTok
+          toTikTok.push(ev);
+          if (isTikTokOnly && platform !== 'tiktok') {
+            console.log('🟦 Routed as TikTok-only event:', rawName);
+          }
+        } else {
+          // trimitem către Meta (TOT ce nu e TikTok-only)
+          toMeta.push(ev);
+        }
       }
 
       // dacă după filtre nu a rămas nimic ⇒ doar confirmăm
