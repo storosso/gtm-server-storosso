@@ -1,6 +1,6 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.5 STABIL
-// - filtrează evenimentele de preview (gtm-msr, Tag Assistant)
-// - trimite doar evenimente reale (storosso.com) spre Meta / TikTok
+// server.js – Meta + TikTok forwarder (Railway) – v1.5 NO-FILTER
+// - filtrează DOAR evenimentele de preview (gtm-msr, Tag Assistant)
+// - NU mai blochează niciun eveniment ecommerce (ViewContent, AddToCart etc.)
 // - loghează TOATE evenimentele care intră (inclusiv engaged_15s)
 
 const http = require('http');
@@ -54,34 +54,9 @@ function isPreviewOrBotEvent(ev) {
   return false;
 }
 
-// detectează evenimente „goale” DOAR pentru evenimentele ecommerce clasice
-// (ViewContent, AddToCart, BeginCheckout, InitiateCheckout, Purchase).
-// Pentru evenimente custom (ex. engaged_15s, engaged_visitor_bordopalla) NU filtrăm.
-function isEmptyCommerce(ev) {
-  const name = String(ev.event_name || '').toLowerCase();
-
-  const ecommerceNames = [
-    'viewcontent',
-    'addtocart',
-    'begincheckout',
-    'initiatecheckout',
-    'purchase'
-  ];
-
-  // dacă nu este un event ecommerce clasic, nu îl tratăm ca „empty commerce”
-  if (!ecommerceNames.includes(name)) {
-    return false;
-  }
-
-  const cd = ev.custom_data || {};
-  const contents = Array.isArray(cd.contents) ? cd.contents : [];
-  const contentIds = Array.isArray(cd.content_ids) ? cd.content_ids : [];
-
-  const hasValue = cd.value != null && cd.value !== 0;
-  const hasContents = contents.length > 0;
-  const hasIds = contentIds.length > 0;
-
-  return !hasValue && !hasContents && !hasIds;
+// placeholder – nu mai blochează nimic
+function isEmptyCommerce(_ev) {
+  return false;
 }
 
 // ----------------- SERVER -----------------
@@ -199,13 +174,9 @@ const server = http.createServer((req, res) => {
           continue;
         }
 
-        // 2) ignoră evenimente ecommerce complet goale (dar NU și evenimente custom gen engaged_15s)
+        // 2) NU mai ignorăm evenimente ecommerce goale – vrem să vedem tot
         if (isEmptyCommerce(ev)) {
-          console.log(
-            '⚪ Ignored empty-commerce event (no value/contents/content_ids):',
-            rawName
-          );
-          continue;
+          console.log('⚪ (no-op) empty-commerce check – currently disabled');
         }
 
         const platform = String(platformLabel || 'meta').toLowerCase();
@@ -218,7 +189,7 @@ const server = http.createServer((req, res) => {
         return safeEnd(
           res,
           200,
-          JSON.stringify({ status: 'ignored_all', reason: 'preview_or_empty' }),
+          JSON.stringify({ status: 'ignored_all', reason: 'preview_only' }),
           'application/json'
         );
       }
