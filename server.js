@@ -19,7 +19,7 @@ if (!FB_PIXEL_ID || !FB_ACCESS_TOKEN) {
 }
 
 // ---------- TIKTOK env ----------
-const TIKTOK_PIXEL_ID = process.env.TIKTOK_PIXEL_ID;           // ex. D2TVRQBC7U1Q4B3YJQ0
+const TIKTOK_PIXEL_ID = process.env.TIKTOK_PIXEL_ID;           // ex. D2TVRQBC77U1Q4B39JQ0
 const TIKTOK_ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;   // Events API access token
 
 if (!TIKTOK_PIXEL_ID || !TIKTOK_ACCESS_TOKEN) {
