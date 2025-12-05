@@ -1,4 +1,4 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.5
+// server.js – Meta + TikTok forwarder (Railway) – v1.6
 // - filtrează evenimentele de preview (gtm-msr, Tag Assistant)
 // - trimite doar evenimente reale (storosso.com) spre Meta / TikTok
 // - loghează TOATE evenimentele care intră (inclusiv engaged_15s)
@@ -56,7 +56,7 @@ function isPreviewOrBotEvent(ev) {
 
 // detectează evenimente „goale” DOAR pentru evenimentele ecommerce clasice
 // (ViewContent, AddToCart, BeginCheckout, InitiateCheckout, Purchase).
-// Pentru evenimente custom (ex. engaged_15s) NU filtrăm – ele trebuie să treacă mai departe.
+// Pentru evenimente custom (ex. engaged_15s, engaged_visitor_bordopalla) NU filtrăm.
 function isEmptyCommerce(ev) {
   const name = String(ev.event_name || '').toLowerCase();
 
@@ -68,7 +68,6 @@ function isEmptyCommerce(ev) {
     'purchase'
   ];
 
-  // dacă nu este un event ecommerce clasic, nu îl tratăm ca „empty commerce”
   if (!ecommerceNames.includes(name)) {
     return false;
   }
@@ -180,8 +179,15 @@ const server = http.createServer((req, res) => {
 
       for (const ev of events) {
         const rawName = ev.event_name || 'unknown';
+        const nameLower = String(rawName).toLowerCase();
         const srcUrl = ev.event_source_url || '';
         const platformLabel = ev.platform || 'meta';
+
+        // CUSTOM: engaged events care NU se filtrează niciodată de empty-commerce
+        const isEngagedCustom =
+          nameLower === 'engaged_15s' ||
+          nameLower === 'engaged15s' ||
+          nameLower === 'engaged_visitor_bordopalla';
 
         // log de bază pentru fiecare event, ca să apară SIGUR în Railway
         console.log(
@@ -193,14 +199,15 @@ const server = http.createServer((req, res) => {
           srcUrl || '(no url)'
         );
 
-        // 1) ignoră preview / tag assistant
+        // 1) ignoră preview / tag assistant (inclusiv engaged) – ca să nu poluăm datele
         if (isPreviewOrBotEvent(ev)) {
           console.log('⚪ Ignored preview/test event from:', srcUrl || '(no url)');
           continue;
         }
 
-        // 2) ignoră evenimente ecommerce complet goale (dar NU și evenimente custom gen engaged_15s)
-        if (isEmptyCommerce(ev)) {
+        // 2) ignoră evenimente ecommerce complet goale
+        //    DAR nu atinge evenimentele engaged_xxx
+        if (!isEngagedCustom && isEmptyCommerce(ev)) {
           console.log(
             '⚪ Ignored empty-commerce event (no value/contents/content_ids):',
             rawName
@@ -424,7 +431,7 @@ function forwardToTikTok(ctx) {
         const evName = normEventName(p.event_name || 'CustomEvent');
 
         const itemsSrc = p.custom_data?.contents || [];
-        const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
+        the items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
           content_id: i.content_id || i.id || i.item_id || 'unknown',
           content_name: i.content_name || i.name || undefined,
           quantity: Number(i.quantity || 1),
@@ -441,14 +448,10 @@ function forwardToTikTok(ctx) {
             : undefined;
 
         return {
-          // v1.3
           event: evName,
           timestamp: iso,
-
-          // compat cu validarea care cere integer
           event_type: evName,
           event_time: sec,
-
           event_id: p.event_id || undefined,
           context: {
             ...(ad ? { ad } : {}),
@@ -479,8 +482,6 @@ function forwardToTikTok(ctx) {
         event_source_id: TIKTOK_PIXEL_ID,
         data: tkEvents
       };
-
-      if ('test_event_code' in body) delete body.test_event_code;
 
       console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
 
