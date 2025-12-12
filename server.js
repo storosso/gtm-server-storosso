@@ -1,3 +1,289 @@
+// server.js – Meta + TikTok forwarder (Railway) – v1.8
+// - filtrează preview (gtm-msr / Tag Assistant)
+// - tt_* și video_play_* merg DOAR către TikTok
+// - non-commerce events către Meta NU includ value/currency/contents
+// - commerce events (VC/ATC/IC/BC/Purchase) includ value/currency/contents
+
+const http = require('http');
+const url = require('url');
+const https = require('https');
+
+const PORT = Number(process.env.PORT) || 8080;
+
+// ---------- META (Facebook) env ----------
+const FB_PIXEL_ID = process.env.FB_PIXEL_ID;
+const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN;
+const META_TEST_EVENT_CODE = process.env.META_TEST_EVENT_CODE || '';
+
+if (!FB_PIXEL_ID || !FB_ACCESS_TOKEN) {
+  console.warn('⚠️ FB_PIXEL_ID or FB_ACCESS_TOKEN missing in env!');
+}
+
+// ---------- TIKTOK env ----------
+const TIKTOK_PIXEL_ID = process.env.TIKTOK_PIXEL_ID;
+const TIKTOK_ACCESS_TOKEN = process.env.TIKTOK_ACCESS_TOKEN;
+
+if (!TIKTOK_PIXEL_ID || !TIKTOK_ACCESS_TOKEN) {
+  console.warn('⚠️ TIKTOK_PIXEL_ID or TIKTOK_ACCESS_TOKEN missing in env!');
+}
+
+// ---------- Helpers globale ----------
+function safeEnd(res, code, msg, type = 'text/plain') {
+  if (!res.headersSent) {
+    res.writeHead(code, { 'Content-Type': type });
+  }
+  res.end(msg);
+}
+
+function tryParseJSON(s) {
+  try { return JSON.parse(s); }
+  catch (_) { return s; }
+}
+
+// detectează evenimente de PREVIEW / Tag Assistant / test
+function isPreviewOrBotEvent(ev) {
+  const src = (ev.event_source_url || '').toLowerCase();
+  const title = (ev.page_title || '').toLowerCase();
+
+  if (src.includes('gtm-msr.appspot.com')) return true;
+  if (src.includes('tagassistant.google.com')) return true;
+  if (title.includes('gtm-msr')) return true;
+
+  return false;
+}
+
+// placeholder – nu mai blochează nimic
+function isEmptyCommerce(_ev) {
+  return false;
+}
+
+// ----------------- SERVER -----------------
+
+const server = http.createServer((req, res) => {
+  const { pathname } = url.parse(req.url, true);
+
+  // ---------- CORS ----------
+  const origin = req.headers.origin || '';
+  res.setHeader('Vary', 'Origin');
+
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,HEAD');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] || 'Content-Type'
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
+
+  if (req.method === 'OPTIONS' || req.method === 'HEAD') {
+    res.writeHead(204);
+    return res.end();
+  }
+  // --------------------------
+
+  // Root & healthz
+  if (pathname === '/' || pathname === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('OK');
+  }
+
+  if (pathname === '/collect' || pathname === '/g/collect') {
+    const ct = (req.headers['content-type'] || '').toLowerCase();
+    if (!(ct.startsWith('application/json') || ct.startsWith('text/plain'))) {
+      return safeEnd(res, 415, 'Unsupported Media Type');
+    }
+
+    let raw = '';
+    req.on('data', chunk => { raw += chunk; });
+
+    req.on('end', async () => {
+      if (!raw.trim()) return safeEnd(res, 400, 'Missing body');
+
+      let incoming;
+      try {
+        incoming = JSON.parse(raw);
+      } catch (e) {
+        console.error('❌ JSON parse error:', e.message);
+        return safeEnd(res, 400, 'Invalid JSON');
+      }
+
+      const events = Array.isArray(incoming?.data) ? incoming.data : [incoming];
+
+      const realIp =
+        (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+        req.socket.remoteAddress ||
+        '';
+
+      console.log('🔔 New /collect request – events count:', events.length);
+
+      // ---- helpers (comune Meta + TikTok) ----
+      const nameMap = {
+        view_content: 'ViewContent',
+        add_to_cart: 'AddToCart',
+        begin_checkout: 'BeginCheckout',
+        initiate_checkout: 'InitiateCheckout',
+        purchase: 'Purchase',
+        page_view: 'PageView'
+      };
+      const normEventName = n =>
+        n ? (nameMap[String(n).toLowerCase()] || n) : 'CustomEvent';
+
+      const num = x => {
+        if (typeof x === 'number') return x;
+        if (x == null) return 0;
+        const s = String(x)
+          .replace(/[^\d.,-]/g, '')
+          .replace(/\.(?=.*\.)/g, '')
+          .replace(',', '.');
+        const v = parseFloat(s);
+        return isNaN(v) ? 0 : v;
+      };
+
+      // --- split by platform & filtrează junk ---
+      const toTikTok = [];
+      const toMeta = [];
+
+      for (const ev of events) {
+        const rawName = ev.event_name || 'unknown';
+        const srcUrl = ev.event_source_url || '';
+        const platformLabel = ev.platform || 'meta';
+
+        // 1) ignoră preview / Tag Assistant ÎNAINTE de log
+        if (isPreviewOrBotEvent(ev)) {
+          console.log(
+            '⚪ Ignored preview/test event:',
+            rawName,
+            '| url:',
+            srcUrl || '(no url)'
+          );
+          continue;
+        }
+
+        console.log(
+          '🔔 Incoming event:',
+          rawName,
+          '| platform:',
+          platformLabel,
+          '| url:',
+          srcUrl || '(no url)'
+        );
+
+        if (isEmptyCommerce(ev)) {
+          console.log('⚪ (no-op) empty-commerce check – currently disabled');
+        }
+
+        const platform = String(platformLabel || 'meta').toLowerCase();
+        const lowerName = String(rawName).toLowerCase();
+
+        // 🔴 TikTok-only
+        const isTikTokOnly =
+          lowerName.startsWith('tt_') || lowerName.startsWith('video_play_');
+
+        if (platform === 'tiktok' || isTikTokOnly) {
+          toTikTok.push(ev);
+          if (isTikTokOnly && platform !== 'tiktok') {
+            console.log('🟦 Routed as TikTok-only event:', rawName);
+          }
+        } else {
+          toMeta.push(ev);
+        }
+      }
+
+      if (!toMeta.length && !toTikTok.length) {
+        return safeEnd(
+          res,
+          200,
+          JSON.stringify({ status: 'ignored_all', reason: 'preview_only' }),
+          'application/json'
+        );
+      }
+
+      const jobs = [];
+
+      if (toMeta.length) {
+        jobs.push(
+          forwardToMeta({
+            events: toMeta,
+            normEventName,
+            num,
+            realIp,
+            reqUA: req.headers['user-agent'] || ''
+          })
+        );
+      }
+
+      if (toTikTok.length) {
+        jobs.push(
+          forwardToTikTok({
+            events: toTikTok,
+            normEventName,
+            num,
+            realIp,
+            reqUA: req.headers['user-agent'] || ''
+          })
+        );
+      }
+
+      try {
+        const results = await Promise.all(jobs);
+        const payload = {};
+
+        for (const r of results) {
+          payload[r.platform] = {
+            status: r.statusCode,
+            body: tryParseJSON(r.body)
+          };
+        }
+
+        const status = results.some(r => r.statusCode >= 400) ? 207 : 200;
+        safeEnd(res, status, JSON.stringify(payload), 'application/json');
+      } catch (err) {
+        console.error('❌ Forward error:', err);
+        safeEnd(
+          res,
+          502,
+          JSON.stringify({
+            error: 'forward_failed',
+            message: String((err && err.message) || err)
+          }),
+          'application/json'
+        );
+      }
+    });
+
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not Found');
+});
+
+// ✅ bind explicit + error handler (ajută Railway)
+server.on('error', (err) => {
+  console.error('❌ SERVER LISTEN ERROR:', err);
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`# GTM Server running on port ${PORT}`);
+});
+
+// graceful logs
+process.on('SIGTERM', () => {
+  console.log('🔻 SIGTERM received');
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  console.log('🔻 SIGINT received');
+  process.exit(0);
+});
+
+// ----------------- FORWARDERS -----------------
+
 function forwardToMeta(ctx) {
   return new Promise((resolve, reject) => {
     const { events, normEventName, num, realIp, reqUA } = ctx;
@@ -10,6 +296,9 @@ function forwardToMeta(ctx) {
       'BeginCheckout',
       'Purchase'
     ]);
+
+    let commerceCount = 0;
+    let nonCommerceCount = 0;
 
     const metaEvents = events.map(p => {
       const evName = normEventName(p.event_name || 'CustomEvent');
@@ -32,10 +321,11 @@ function forwardToMeta(ctx) {
         fbc: p.user_data?.fbc || ''
       };
 
-      // ✅ Construim custom_data diferit în funcție de tipul evenimentului
       let custom_data;
 
       if (COMMERCE_EVENTS.has(evName)) {
+        commerceCount++;
+
         const value =
           p.custom_data?.value != null
             ? num(p.custom_data.value)
@@ -59,7 +349,9 @@ function forwardToMeta(ctx) {
           contents
         };
       } else {
-        // ✅ Non-commerce (ex: engaged_homepage): păstrăm doar date non-monetare
+        nonCommerceCount++;
+
+        // ✅ Non-commerce: păstrăm doar date non-monetare
         custom_data = { ...(p.custom_data || {}) };
 
         delete custom_data.value;
@@ -79,6 +371,10 @@ function forwardToMeta(ctx) {
         custom_data
       };
     });
+
+    console.log(
+      `🧾 Meta event split -> commerce:${commerceCount} | non-commerce:${nonCommerceCount}`
+    );
 
     const metaBody = {
       data: metaEvents,
@@ -126,5 +422,111 @@ function forwardToMeta(ctx) {
 
     fbReq.write(JSON.stringify(metaBody));
     fbReq.end();
+  });
+}
+
+function forwardToTikTok(ctx) {
+  return new Promise(async (resolve, reject) => {
+    const { events, normEventName, num, realIp, reqUA } = ctx;
+
+    try {
+      console.log('TT v1.3-compat (int event_time)');
+
+      const tkEvents = events.map(p => {
+        const sec = Number(p.event_time || Math.floor(Date.now() / 1000));
+        const iso = new Date(sec * 1000).toISOString();
+        const evName = normEventName(p.event_name || 'CustomEvent');
+
+        const itemsSrc = p.custom_data?.contents || [];
+        const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
+          content_id: i.content_id || i.id || i.item_id || 'unknown',
+          content_name: i.content_name || i.name || undefined,
+          quantity: Number(i.quantity || 1),
+          price: num(i.price != null ? i.price : i.item_price)
+        }));
+
+        const ad =
+          p.user_data && p.user_data.ttclid
+            ? { callback: p.user_data.ttclid }
+            : undefined;
+
+        return {
+          event: evName,
+          timestamp: iso,
+
+          event_type: evName,
+          event_time: sec,
+
+          event_id: p.event_id || undefined,
+          context: {
+            ...(ad ? { ad } : {}),
+            page: {
+              url: p.event_source_url || '',
+              referrer: p.referrer || ''
+            },
+            user: {
+              external_id: p.user_data?.external_id || undefined,
+              email: p.user_data?.em || undefined,
+              phone: p.user_data?.ph || undefined,
+              ip: p.user_data?.client_ip_address || realIp || undefined,
+              user_agent: p.user_data?.client_user_agent || reqUA || undefined
+            }
+          },
+          properties: {
+            currency: p.custom_data?.currency || 'EUR',
+            value: num(p.custom_data?.value),
+            order_id: p.custom_data?.order_id,
+            content_type: p.custom_data?.content_type || 'product',
+            contents: items
+          }
+        };
+      });
+
+      const body = {
+        event_source: 'web',
+        event_source_id: TIKTOK_PIXEL_ID,
+        data: tkEvents
+      };
+
+      console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
+
+      const options = {
+        hostname: 'business-api.tiktok.com',
+        path: '/open_api/v1.3/event/track/',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Token': TIKTOK_ACCESS_TOKEN
+        },
+        timeout: 15000
+      };
+
+      const tkBody = await httpRequestJSON(options, body);
+      console.log('🟦 TikTok response:', tkBody.statusCode, tkBody.body);
+      resolve({
+        platform: 'tiktok',
+        statusCode: tkBody.statusCode,
+        body: tkBody.body
+      });
+    } catch (err) {
+      console.error('❌ TikTok send error:', err);
+      reject(err);
+    }
+  });
+}
+
+function httpRequestJSON(options, payload) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, res => {
+      let data = '';
+      res.on('data', c => { data += c; });
+      res.on('end', () =>
+        resolve({ statusCode: res.statusCode, headers: res.headers, body: data })
+      );
+    });
+    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+    req.on('error', reject);
+    req.write(JSON.stringify(payload));
+    req.end();
   });
 }
