@@ -1,12 +1,11 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.8.1
+// server.js – Meta + TikTok forwarder (Railway) – v1.8.2
 // - filtrează preview (gtm-msr / Tag Assistant)
 // - tt_* și video_play_* merg DOAR către TikTok
 // - non-commerce events către Meta NU includ value/currency/contents
 // - commerce events (VC/ATC/IC/BC/Purchase) includ value/currency/contents
-// - FIX: force NON-COMMERCE pentru engaged_homepage (+ alte engagement signals)
+// - FIX: force NON-COMMERCE pentru engaged_* (inclusiv engaged_homepage)
 // - + body size limit (anti-abuz)
 
-// ----------------- DEPS -----------------
 const http = require('http');
 const url = require('url');
 const https = require('https');
@@ -314,12 +313,8 @@ function forwardToMeta(ctx) {
       'Purchase'
     ]);
 
-    // ✅ FIX: force NON-COMMERCE pentru engagement signals (inclusiv engaged_homepage)
-    // -> elimină value/currency/contents indiferent ce vine din browser
+    // ✅ NON-COMMERCE hard list (extra safety)
     const FORCE_NON_COMMERCE_RAW = new Set([
-      'engaged_homepage',
-      'engaged_visitor_45s',
-      'engaged_homepage_45s',
       'scroll_25',
       'scroll_50',
       'scroll_75',
@@ -356,10 +351,11 @@ function forwardToMeta(ctx) {
         fbc: p.user_data?.fbc || ''
       };
 
-      // -----------------------------
-      // ✅ FIX: forțează NON-COMMERCE
-      // -----------------------------
-      if (FORCE_NON_COMMERCE_RAW.has(rawLower)) {
+      // -------------------------------------------------
+      // ✅ FIX FINAL: orice engaged_* => NON-COMMERCE forțat
+      // (rezolvă engaged_homepage warnings din Events Manager)
+      // -------------------------------------------------
+      if (rawLower.startsWith('engaged_') || FORCE_NON_COMMERCE_RAW.has(rawLower)) {
         nonCommerceCount++;
 
         const cd = { ...(p.custom_data || {}) };
