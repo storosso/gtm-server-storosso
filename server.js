@@ -1,14 +1,18 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.8
+// server.js – Meta + TikTok forwarder (Railway) – v1.8.1
 // - filtrează preview (gtm-msr / Tag Assistant)
 // - tt_* și video_play_* merg DOAR către TikTok
 // - non-commerce events către Meta NU includ value/currency/contents
 // - commerce events (VC/ATC/IC/BC/Purchase) includ value/currency/contents
+// - FIX: force NON-COMMERCE pentru engaged_homepage (+ alte engagement signals)
+// - + body size limit (anti-abuz)
 
+// ----------------- DEPS -----------------
 const http = require('http');
 const url = require('url');
 const https = require('https');
 
 const PORT = Number(process.env.PORT) || 8080;
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES) || 512 * 1024; // 512KB
 
 // ---------- META (Facebook) env ----------
 const FB_PIXEL_ID = process.env.FB_PIXEL_ID;
@@ -57,8 +61,18 @@ function isEmptyCommerce(_ev) {
   return false;
 }
 
-// ----------------- SERVER -----------------
+function num(x) {
+  if (typeof x === 'number') return x;
+  if (x == null) return 0;
+  const s = String(x)
+    .replace(/[^\d.,-]/g, '')
+    .replace(/\.(?=.*\.)/g, '')
+    .replace(',', '.');
+  const v = parseFloat(s);
+  return isNaN(v) ? 0 : v;
+}
 
+// ----------------- SERVER -----------------
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
@@ -99,7 +113,19 @@ const server = http.createServer((req, res) => {
     }
 
     let raw = '';
-    req.on('data', chunk => { raw += chunk; });
+    req.on('data', chunk => {
+      raw += chunk;
+      if (raw.length > MAX_BODY_BYTES) {
+        console.warn('❌ Body too large, rejecting');
+        safeEnd(res, 413, 'Payload Too Large');
+        req.destroy();
+      }
+    });
+
+    req.on('error', (e) => {
+      console.error('❌ Request stream error:', e);
+      try { safeEnd(res, 400, 'Bad Request'); } catch(_) {}
+    });
 
     req.on('end', async () => {
       if (!raw.trim()) return safeEnd(res, 400, 'Missing body');
@@ -130,19 +156,9 @@ const server = http.createServer((req, res) => {
         purchase: 'Purchase',
         page_view: 'PageView'
       };
+
       const normEventName = n =>
         n ? (nameMap[String(n).toLowerCase()] || n) : 'CustomEvent';
-
-      const num = x => {
-        if (typeof x === 'number') return x;
-        if (x == null) return 0;
-        const s = String(x)
-          .replace(/[^\d.,-]/g, '')
-          .replace(/\.(?=.*\.)/g, '')
-          .replace(',', '.');
-        const v = parseFloat(s);
-        return isNaN(v) ? 0 : v;
-      };
 
       // --- split by platform & filtrează junk ---
       const toTikTok = [];
@@ -270,6 +286,7 @@ server.on('error', (err) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`# GTM Server running on port ${PORT}`);
+  console.log(`# MAX_BODY_BYTES = ${MAX_BODY_BYTES}`);
 });
 
 // graceful logs
@@ -297,11 +314,29 @@ function forwardToMeta(ctx) {
       'Purchase'
     ]);
 
+    // ✅ FIX: force NON-COMMERCE pentru engagement signals (inclusiv engaged_homepage)
+    // -> elimină value/currency/contents indiferent ce vine din browser
+    const FORCE_NON_COMMERCE_RAW = new Set([
+      'engaged_homepage',
+      'engaged_visitor_45s',
+      'engaged_homepage_45s',
+      'scroll_25',
+      'scroll_50',
+      'scroll_75',
+      'scroll_90',
+      'time_on_page',
+      'click_cta',
+      'lead',
+      'drill_guide'
+    ]);
+
     let commerceCount = 0;
     let nonCommerceCount = 0;
 
     const metaEvents = events.map(p => {
-      const evName = normEventName(p.event_name || 'CustomEvent');
+      const rawName = String(p.event_name || 'CustomEvent');
+      const rawLower = rawName.toLowerCase();
+      const evName = normEventName(rawName);
 
       const contentsSrc =
         p.custom_data?.contents || p.ecommerce?.add?.products || [];
@@ -320,6 +355,30 @@ function forwardToMeta(ctx) {
         fbp: p.user_data?.fbp || '',
         fbc: p.user_data?.fbc || ''
       };
+
+      // -----------------------------
+      // ✅ FIX: forțează NON-COMMERCE
+      // -----------------------------
+      if (FORCE_NON_COMMERCE_RAW.has(rawLower)) {
+        nonCommerceCount++;
+
+        const cd = { ...(p.custom_data || {}) };
+        delete cd.value;
+        delete cd.currency;
+        delete cd.contents;
+        delete cd.content_ids;
+        delete cd.content_type;
+
+        return {
+          event_name: evName,
+          event_time: Number(p.event_time || Math.floor(Date.now() / 1000)),
+          event_source_url: p.event_source_url || '',
+          action_source: p.action_source || 'website',
+          event_id: p.event_id || undefined,
+          user_data,
+          custom_data: cd
+        };
+      }
 
       let custom_data;
 
