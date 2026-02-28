@@ -1,10 +1,9 @@
-// server.js – Meta + TikTok forwarder (Railway) – v1.8.2
-// - filtrează preview (gtm-msr / Tag Assistant)
-// - tt_* și video_play_* merg DOAR către TikTok
-// - non-commerce events către Meta NU includ value/currency/contents
-// - commerce events (VC/ATC/IC/BC/Purchase) includ value/currency/contents
-// - FIX: force NON-COMMERCE pentru engaged_* (inclusiv engaged_homepage)
-// - + body size limit (anti-abuz)
+// server.js – Meta + TikTok forwarder (Railway) – stable patch
+// ✅ graceful shutdown (no immediate exit on SIGTERM)
+// ✅ byte-accurate body limit
+// ✅ optional DEBUG_LOGS=1 for verbose payload logs
+// ✅ uncaught handlers
+// ✅ keep-alive + timeouts
 
 const http = require('http');
 const url = require('url');
@@ -12,8 +11,9 @@ const https = require('https');
 
 const PORT = Number(process.env.PORT) || 8080;
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES) || 512 * 1024; // 512KB
+const DEBUG_LOGS = String(process.env.DEBUG_LOGS || '').trim() === '1';
 
-// ---------- META (Facebook) env ----------
+// ---------- META env ----------
 const FB_PIXEL_ID = process.env.FB_PIXEL_ID;
 const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN;
 const META_TEST_EVENT_CODE = process.env.META_TEST_EVENT_CODE || '';
@@ -30,12 +30,12 @@ if (!TIKTOK_PIXEL_ID || !TIKTOK_ACCESS_TOKEN) {
   console.warn('⚠️ TIKTOK_PIXEL_ID or TIKTOK_ACCESS_TOKEN missing in env!');
 }
 
-// ---------- Helpers globale ----------
+// ---------- Helpers ----------
 function safeEnd(res, code, msg, type = 'text/plain') {
-  if (!res.headersSent) {
-    res.writeHead(code, { 'Content-Type': type });
-  }
-  res.end(msg);
+  try {
+    if (!res.headersSent) res.writeHead(code, { 'Content-Type': type });
+    res.end(msg);
+  } catch (_) {}
 }
 
 function tryParseJSON(s) {
@@ -43,7 +43,6 @@ function tryParseJSON(s) {
   catch (_) { return s; }
 }
 
-// detectează evenimente de PREVIEW / Tag Assistant / test
 function isPreviewOrBotEvent(ev) {
   const src = (ev.event_source_url || '').toLowerCase();
   const title = (ev.page_title || '').toLowerCase();
@@ -71,7 +70,15 @@ function num(x) {
   return isNaN(v) ? 0 : v;
 }
 
-// ----------------- SERVER -----------------
+// ---------- Global crash handlers (important on Railway) ----------
+process.on('uncaughtException', (err) => {
+  console.error('❌ uncaughtException:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ unhandledRejection:', reason);
+});
+
+// ---------- SERVER ----------
 const server = http.createServer((req, res) => {
   const { pathname } = url.parse(req.url, true);
 
@@ -99,7 +106,7 @@ const server = http.createServer((req, res) => {
   }
   // --------------------------
 
-  // Root & healthz
+  // Root & health
   if (pathname === '/' || pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('OK');
@@ -112,18 +119,24 @@ const server = http.createServer((req, res) => {
     }
 
     let raw = '';
-    req.on('data', chunk => {
-      raw += chunk;
-      if (raw.length > MAX_BODY_BYTES) {
-        console.warn('❌ Body too large, rejecting');
+    let totalBytes = 0;
+
+    req.on('data', (chunk) => {
+      // chunk can be Buffer; count bytes precisely
+      totalBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+      if (totalBytes > MAX_BODY_BYTES) {
+        console.warn('❌ Body too large, rejecting', { totalBytes, MAX_BODY_BYTES });
         safeEnd(res, 413, 'Payload Too Large');
+        // destroy stream to stop reading more
         req.destroy();
+        return;
       }
+      raw += chunk;
     });
 
     req.on('error', (e) => {
       console.error('❌ Request stream error:', e);
-      try { safeEnd(res, 400, 'Bad Request'); } catch(_) {}
+      safeEnd(res, 400, 'Bad Request');
     });
 
     req.on('end', async () => {
@@ -146,7 +159,6 @@ const server = http.createServer((req, res) => {
 
       console.log('🔔 New /collect request – events count:', events.length);
 
-      // ---- helpers (comune Meta + TikTok) ----
       const nameMap = {
         view_content: 'ViewContent',
         add_to_cart: 'AddToCart',
@@ -156,7 +168,7 @@ const server = http.createServer((req, res) => {
         page_view: 'PageView'
       };
 
-      const normEventName = n =>
+      const normEventName = (n) =>
         n ? (nameMap[String(n).toLowerCase()] || n) : 'CustomEvent';
 
       // --- split by platform & filtrează junk ---
@@ -168,25 +180,10 @@ const server = http.createServer((req, res) => {
         const srcUrl = ev.event_source_url || '';
         const platformLabel = ev.platform || 'meta';
 
-        // 1) ignoră preview / Tag Assistant ÎNAINTE de log
         if (isPreviewOrBotEvent(ev)) {
-          console.log(
-            '⚪ Ignored preview/test event:',
-            rawName,
-            '| url:',
-            srcUrl || '(no url)'
-          );
+          console.log('⚪ Ignored preview/test event:', rawName, '| url:', srcUrl || '(no url)');
           continue;
         }
-
-        console.log(
-          '🔔 Incoming event:',
-          rawName,
-          '| platform:',
-          platformLabel,
-          '| url:',
-          srcUrl || '(no url)'
-        );
 
         if (isEmptyCommerce(ev)) {
           console.log('⚪ (no-op) empty-commerce check – currently disabled');
@@ -195,9 +192,7 @@ const server = http.createServer((req, res) => {
         const platform = String(platformLabel || 'meta').toLowerCase();
         const lowerName = String(rawName).toLowerCase();
 
-        // 🔴 TikTok-only
-        const isTikTokOnly =
-          lowerName.startsWith('tt_') || lowerName.startsWith('video_play_');
+        const isTikTokOnly = lowerName.startsWith('tt_') || lowerName.startsWith('video_play_');
 
         if (platform === 'tiktok' || isTikTokOnly) {
           toTikTok.push(ev);
@@ -207,6 +202,8 @@ const server = http.createServer((req, res) => {
         } else {
           toMeta.push(ev);
         }
+
+        console.log('🔔 Incoming event:', rawName, '| platform:', platformLabel, '| url:', srcUrl || '(no url)');
       }
 
       if (!toMeta.length && !toTikTok.length) {
@@ -255,17 +252,14 @@ const server = http.createServer((req, res) => {
           };
         }
 
-        const status = results.some(r => r.statusCode >= 400) ? 207 : 200;
+        const status = results.some((r) => r.statusCode >= 400) ? 207 : 200;
         safeEnd(res, status, JSON.stringify(payload), 'application/json');
       } catch (err) {
         console.error('❌ Forward error:', err);
         safeEnd(
           res,
           502,
-          JSON.stringify({
-            error: 'forward_failed',
-            message: String((err && err.message) || err)
-          }),
+          JSON.stringify({ error: 'forward_failed', message: String((err && err.message) || err) }),
           'application/json'
         );
       }
@@ -278,7 +272,11 @@ const server = http.createServer((req, res) => {
   res.end('Not Found');
 });
 
-// ✅ bind explicit + error handler (ajută Railway)
+// ✅ Railway-friendly server settings
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 70_000;
+server.requestTimeout = 0; // don't auto-timeout long requests
+
 server.on('error', (err) => {
   console.error('❌ SERVER LISTEN ERROR:', err);
 });
@@ -286,17 +284,31 @@ server.on('error', (err) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`# GTM Server running on port ${PORT}`);
   console.log(`# MAX_BODY_BYTES = ${MAX_BODY_BYTES}`);
+  console.log(`# DEBUG_LOGS = ${DEBUG_LOGS ? 'ON' : 'OFF'}`);
 });
 
-// graceful logs
-process.on('SIGTERM', () => {
-  console.log('🔻 SIGTERM received');
-  process.exit(0);
-});
-process.on('SIGINT', () => {
-  console.log('🔻 SIGINT received');
-  process.exit(0);
-});
+// ✅ graceful shutdown (IMPORTANT)
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  console.log(`🔻 ${signal} received -> graceful shutdown`);
+  // stop accepting new connections
+  server.close(() => {
+    console.log('✅ HTTP server closed');
+    process.exit(0);
+  });
+
+  // force-exit if stuck
+  setTimeout(() => {
+    console.log('⏱️ Forced exit after timeout');
+    process.exit(0);
+  }, 8000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ----------------- FORWARDERS -----------------
 
@@ -304,7 +316,6 @@ function forwardToMeta(ctx) {
   return new Promise((resolve, reject) => {
     const { events, normEventName, num, realIp, reqUA } = ctx;
 
-    // ✅ Doar aceste evenimente au voie să aibă value/currency/contents
     const COMMERCE_EVENTS = new Set([
       'ViewContent',
       'AddToCart',
@@ -313,7 +324,6 @@ function forwardToMeta(ctx) {
       'Purchase'
     ]);
 
-    // ✅ NON-COMMERCE hard list (extra safety)
     const FORCE_NON_COMMERCE_RAW = new Set([
       'scroll_25',
       'scroll_50',
@@ -328,14 +338,13 @@ function forwardToMeta(ctx) {
     let commerceCount = 0;
     let nonCommerceCount = 0;
 
-    const metaEvents = events.map(p => {
+    const metaEvents = events.map((p) => {
       const rawName = String(p.event_name || 'CustomEvent');
       const rawLower = rawName.toLowerCase();
       const evName = normEventName(rawName);
 
-      const contentsSrc =
-        p.custom_data?.contents || p.ecommerce?.add?.products || [];
-      const contents = (Array.isArray(contentsSrc) ? contentsSrc : []).map(i => ({
+      const contentsSrc = p.custom_data?.contents || p.ecommerce?.add?.products || [];
+      const contents = (Array.isArray(contentsSrc) ? contentsSrc : []).map((i) => ({
         id: i.id || i.item_id || 'unknown',
         quantity: Number(i.quantity || 1),
         item_price: num(i.item_price != null ? i.item_price : i.price)
@@ -351,10 +360,7 @@ function forwardToMeta(ctx) {
         fbc: p.user_data?.fbc || ''
       };
 
-      // -------------------------------------------------
-      // ✅ FIX FINAL: orice engaged_* => NON-COMMERCE forțat
-      // (rezolvă engaged_homepage warnings din Events Manager)
-      // -------------------------------------------------
+      // engaged_* => NON-COMMERCE forced
       if (rawLower.startsWith('engaged_') || FORCE_NON_COMMERCE_RAW.has(rawLower)) {
         nonCommerceCount++;
 
@@ -384,17 +390,13 @@ function forwardToMeta(ctx) {
         const value =
           p.custom_data?.value != null
             ? num(p.custom_data.value)
-            : contents.reduce(
-                (s, c) => s + Number(c.quantity) * num(c.item_price),
-                0
-              );
+            : contents.reduce((s, c) => s + Number(c.quantity) * num(c.item_price), 0);
 
-        const currency =
-          p.custom_data?.currency || p.ecommerce?.currencyCode || 'EUR';
+        const currency = p.custom_data?.currency || p.ecommerce?.currencyCode || 'EUR';
 
         const content_ids = Array.isArray(p.custom_data?.content_ids)
           ? p.custom_data.content_ids
-          : contents.map(c => c.id);
+          : contents.map((c) => c.id);
 
         custom_data = {
           value,
@@ -405,8 +407,6 @@ function forwardToMeta(ctx) {
         };
       } else {
         nonCommerceCount++;
-
-        // ✅ Non-commerce: păstrăm doar date non-monetare
         custom_data = { ...(p.custom_data || {}) };
 
         delete custom_data.value;
@@ -427,20 +427,20 @@ function forwardToMeta(ctx) {
       };
     });
 
-    console.log(
-      `🧾 Meta event split -> commerce:${commerceCount} | non-commerce:${nonCommerceCount}`
-    );
+    console.log(`🧾 Meta event split -> commerce:${commerceCount} | non-commerce:${nonCommerceCount}`);
 
     const metaBody = {
       data: metaEvents,
       access_token: FB_ACCESS_TOKEN,
       partner_agent: 'storosso-gtm-railway-ss'
     };
-    if (META_TEST_EVENT_CODE) {
-      metaBody.test_event_code = META_TEST_EVENT_CODE;
-    }
+    if (META_TEST_EVENT_CODE) metaBody.test_event_code = META_TEST_EVENT_CODE;
 
-    console.log('📦 Sending to Meta:\n' + JSON.stringify(metaBody, null, 2));
+    if (DEBUG_LOGS) {
+      console.log('📦 Sending to Meta:\n' + JSON.stringify(metaBody, null, 2));
+    } else {
+      console.log('📦 Sending to Meta: events=', metaEvents.length);
+    }
 
     const options = {
       hostname: 'graph.facebook.com',
@@ -450,18 +450,15 @@ function forwardToMeta(ctx) {
       timeout: 15000
     };
 
-    const fbReq = https.request(options, fbRes => {
+    const fbReq = https.request(options, (fbRes) => {
       let fbData = '';
-      fbRes.on('data', d => { fbData += d; });
+      fbRes.on('data', (d) => { fbData += d; });
       fbRes.on('end', () => {
         console.log('📬 Meta statusCode:', fbRes.statusCode);
-        console.log('📋 Meta headers:', fbRes.headers);
+        if (DEBUG_LOGS) console.log('📋 Meta headers:', fbRes.headers);
         console.log('🟪 Meta response body:', fbData);
-        resolve({
-          platform: 'meta',
-          statusCode: fbRes.statusCode,
-          body: fbData
-        });
+
+        resolve({ platform: 'meta', statusCode: fbRes.statusCode, body: fbData });
       });
     });
 
@@ -470,7 +467,7 @@ function forwardToMeta(ctx) {
       fbReq.destroy(new Error('timeout'));
     });
 
-    fbReq.on('error', err => {
+    fbReq.on('error', (err) => {
       console.error('❌ Meta request error:', err);
       reject(err);
     });
@@ -487,13 +484,13 @@ function forwardToTikTok(ctx) {
     try {
       console.log('TT v1.3-compat (int event_time)');
 
-      const tkEvents = events.map(p => {
+      const tkEvents = events.map((p) => {
         const sec = Number(p.event_time || Math.floor(Date.now() / 1000));
         const iso = new Date(sec * 1000).toISOString();
         const evName = normEventName(p.event_name || 'CustomEvent');
 
         const itemsSrc = p.custom_data?.contents || [];
-        const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map(i => ({
+        const items = (Array.isArray(itemsSrc) ? itemsSrc : []).map((i) => ({
           content_id: i.content_id || i.id || i.item_id || 'unknown',
           content_name: i.content_name || i.name || undefined,
           quantity: Number(i.quantity || 1),
@@ -501,9 +498,7 @@ function forwardToTikTok(ctx) {
         }));
 
         const ad =
-          p.user_data && p.user_data.ttclid
-            ? { callback: p.user_data.ttclid }
-            : undefined;
+          p.user_data && p.user_data.ttclid ? { callback: p.user_data.ttclid } : undefined;
 
         return {
           event: evName,
@@ -515,10 +510,7 @@ function forwardToTikTok(ctx) {
           event_id: p.event_id || undefined,
           context: {
             ...(ad ? { ad } : {}),
-            page: {
-              url: p.event_source_url || '',
-              referrer: p.referrer || ''
-            },
+            page: { url: p.event_source_url || '', referrer: p.referrer || '' },
             user: {
               external_id: p.user_data?.external_id || undefined,
               email: p.user_data?.em || undefined,
@@ -537,13 +529,13 @@ function forwardToTikTok(ctx) {
         };
       });
 
-      const body = {
-        event_source: 'web',
-        event_source_id: TIKTOK_PIXEL_ID,
-        data: tkEvents
-      };
+      const body = { event_source: 'web', event_source_id: TIKTOK_PIXEL_ID, data: tkEvents };
 
-      console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
+      if (DEBUG_LOGS) {
+        console.log('📦 Sending to TikTok:\n' + JSON.stringify(body, null, 2));
+      } else {
+        console.log('📦 Sending to TikTok: events=', tkEvents.length);
+      }
 
       const options = {
         hostname: 'business-api.tiktok.com',
@@ -558,11 +550,8 @@ function forwardToTikTok(ctx) {
 
       const tkBody = await httpRequestJSON(options, body);
       console.log('🟦 TikTok response:', tkBody.statusCode, tkBody.body);
-      resolve({
-        platform: 'tiktok',
-        statusCode: tkBody.statusCode,
-        body: tkBody.body
-      });
+
+      resolve({ platform: 'tiktok', statusCode: tkBody.statusCode, body: tkBody.body });
     } catch (err) {
       console.error('❌ TikTok send error:', err);
       reject(err);
@@ -572,14 +561,12 @@ function forwardToTikTok(ctx) {
 
 function httpRequestJSON(options, payload) {
   return new Promise((resolve, reject) => {
-    const req = https.request(options, res => {
+    const req = https.request(options, (res) => {
       let data = '';
-      res.on('data', c => { data += c; });
-      res.on('end', () =>
-        resolve({ statusCode: res.statusCode, headers: res.headers, body: data })
-      );
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: data }));
     });
-    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', reject);
     req.write(JSON.stringify(payload));
     req.end();
